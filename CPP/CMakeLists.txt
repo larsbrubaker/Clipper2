@@ -188,6 +188,7 @@ if(CLIPPER2_EXAMPLES)
       RectClipping
       SimpleClipping
       VariableOffset
+      TestInstrumentation
     )
 
     foreach(ex ${EXAMPLES})

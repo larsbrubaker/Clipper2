@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mklink:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo test)",
+      "Bash(dotnet test:*)",
+      "Bash(dotnet build)",
+      "Bash(dotnet run:*)",
+      "Bash(cargo test:*)",
+      "Bash(rustc:*)",
+      "Bash(timeout 30 cargo test test_union_negative_fill_rule -- --nocapture)",
+      "Bash(timeout 10 cargo test test_union_negative_fill_rule -- --nocapture)",
+      "Bash(timeout 15 cargo test test_union_negative_fill_rule -- --nocapture)",
+      "Bash(dir)",
+      "Bash(cat:*)",
+      "Bash(cargo check:*)",
+      "Bash(dir:*)",
+      "Bash(cmake:*)",
+      "Bash(\"./Release/ClipperTests.exe\" --gtest_list_tests)",
+      "Bash(\"./Release/ClipperTests.exe\" --gtest_filter=\"*TestNegativeOrientation*\" --gtest_verbose)",
+      "Bash(\"./Release/ClipperTests.exe\" --gtest_filter=\"*TestNegativeOrientation*\")",
+      "Bash(where mysql)",
+      "Bash(g++:*)",
+      "Bash(cl:*)",
+      "Bash(\"./Release/TestInstrumentation.exe\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,14 @@
+[package]
+name = "clipper2"
+version = "0.1.0"
+edition = "2021"
+authors = ["Clipper2 Rust Port"]
+description = "Rust port of the Clipper2 polygon clipping library"
+license = "BSL-1.0"
+repository = "https://github.com/clipper2/clipper2-rust"
+keywords = ["geometry", "polygon", "clipping", "boolean", "graphics"]
+categories = ["mathematics", "graphics"]
+
+[dependencies]
+
+[dev-dependencies]
