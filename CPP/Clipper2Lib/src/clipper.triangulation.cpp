@@ -74,6 +74,7 @@ namespace Clipper2Lib
     bool                      useDelaunay = true;
     Vertex2*                  lowermostVertex = nullptr;
     Edge*                     firstActive = nullptr;
+    bool HasVertexOnSegmentInterior(const Point64& a, const Point64& b) const;
     void AddPath(const Path64& path);
     bool AddPaths(const Paths64& paths);
     void CleanUp();
@@ -198,6 +199,23 @@ namespace Clipper2Lib
     auto it = std::find(vert->edges.begin(), vert->edges.end(), edge);
     if (it == vert->edges.end()) DoError(undefined_error_i);
     vert->edges.erase(it);
+  }
+
+  // True when v lies strictly inside the segment a-b. An edge made through a
+  // vertex splits the shape wrongly while the triangulation still reports success.
+  static bool OnSegmentInterior(const Point64& a, const Point64& b, const Point64& v)
+  {
+    if (v == a || v == b) return false;
+    if (v.x < std::min(a.x, b.x) || v.x > std::max(a.x, b.x) ||
+      v.y < std::min(a.y, b.y) || v.y > std::max(a.y, b.y)) return false;
+    return CrossProductSign(a, v, b) == 0;
+  }
+
+  bool Delaunay::HasVertexOnSegmentInterior(const Point64& a, const Point64& b) const
+  {
+    for (const Vertex2* vx : allVertices)
+      if (!vx->edges.empty() && OnSegmentInterior(a, b, vx->pt)) return true;
+    return false;
   }
 
   static bool FindLocMinIdx(const Path64& path, size_t len, size_t& idx)
@@ -727,6 +745,13 @@ namespace Clipper2Lib
         e = e->nextE;
       }
     }
+    // Move to the nearest vertex on the new edge, so the edge ends before it.
+    for (Vertex2* vx : allVertices)
+    {
+      if (vx == vAbove || vx == vBest || vx->edges.empty()) continue;
+      if (!OnSegmentInterior(vAbove->pt, vBest->pt, vx->pt)) continue;
+      vBest = vx;
+    }
     return CreateEdge(vBest, vAbove, EdgeKind::loose);
   }
 
@@ -801,6 +826,7 @@ namespace Clipper2Lib
       // be very careful creating loose horizontals at minY
       if (vAlt->pt.y == v->pt.y && v->pt.y == minY &&
         HorizontalBetween(vAlt, v)) return;
+      if (HasVertexOnSegmentInterior(vAlt->pt, v->pt)) return;
       eX = CreateEdge(vAlt, v, EdgeKind::loose);
     }
 
@@ -856,6 +882,7 @@ namespace Clipper2Lib
       // be very careful creating loose horizontals at minY
       if (vAlt->pt.y == v->pt.y && v->pt.y == minY &&
         HorizontalBetween(vAlt, v)) return;
+      if (HasVertexOnSegmentInterior(vAlt->pt, v->pt)) return;
       eX = CreateEdge(vAlt, v, EdgeKind::loose);
     }
 
