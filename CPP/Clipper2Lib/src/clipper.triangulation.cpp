@@ -72,10 +72,9 @@ namespace Clipper2Lib
     std::stack<Edge*>         horzEdgeStack;
     std::stack<Vertex2*>      locMinStack;
     bool                      useDelaunay = true;
-    Vertex2*                  lowermostVertex = nullptr;
     Edge*                     firstActive = nullptr;
     bool HasVertexOnSegmentInterior(const Point64& a, const Point64& b) const;
-    void AddPath(const Path64& path);
+    void AddPath(const Path64& path, bool keepSmall);
     bool AddPaths(const Paths64& paths);
     void CleanUp();
     bool FixupEdgeIntersects();
@@ -216,6 +215,160 @@ namespace Clipper2Lib
     for (const Vertex2* vx : allVertices)
       if (!vx->edges.empty() && OnSegmentInterior(a, b, vx->pt)) return true;
     return false;
+  }
+
+  // Remove repeated vertices, collinear vertices and spike tips, repeating until
+  // the closed path has none or nothing is left of it. AddPath can then visit
+  // every index in turn, so it never skips over the vertex that closes the path.
+  static Path64 RemoveCollinearVertices(const Path64& path)
+  {
+    Path64 kept;
+    kept.reserve(path.size());
+    for (const Point64& pt : path)
+    {
+      while (kept.size() >= 2 && kept.back() != pt &&
+        CrossProductSign(kept[kept.size() - 2], kept.back(), pt) == 0)
+          kept.pop_back();
+      if (kept.empty() || kept.back() != pt) kept.push_back(pt);
+    }
+    size_t first = 0;
+    while (kept.size() - first >= 3)
+    {
+      size_t last = kept.size() - 1;
+      if (CrossProductSign(kept[last - 1], kept[last], kept[first]) == 0)
+        kept.pop_back();
+      else if (CrossProductSign(kept[last], kept[first], kept[first + 1]) == 0)
+        ++first;
+      else
+        return Path64(kept.begin() + first, kept.end());
+    }
+    return Path64();
+  }
+
+  // Record the directed edge a->b, unless b->a is already recorded. Edges traced
+  // in opposite directions bound nothing: the two sides are either both filled
+  // or both empty. Returns whether the pair cancelled.
+  static bool AddDirectedEdge(std::vector<std::vector<size_t>>& next, size_t a, size_t b)
+  {
+    auto& fromB = next[b];
+    auto it = std::find(fromB.begin(), fromB.end(), a);
+    if (it == fromB.end())
+    {
+      next[a].push_back(b);
+      return false;
+    }
+    *it = fromB.back();
+    fromB.pop_back();
+    return true;
+  }
+
+  static bool PointLess(const Point64& a, const Point64& b)
+  {
+    return (a.x == b.x) ? (a.y < b.y) : (a.x < b.x);
+  }
+
+  // Rewrite paths that touch as simple loops, which the sweep can walk. A vertex
+  // on another edge splits that edge, opposed edges cancel, and a path that
+  // revisits a point becomes one loop per visit. Paths with no such contact are
+  // only cleaned of degenerate vertices. Returns whether any paths touched.
+  static bool ResolveTouchingPaths(const Paths64& paths, Paths64& result)
+  {
+    constexpr size_t none = std::numeric_limits<size_t>::max();
+    Paths64 cleaned;
+    cleaned.reserve(paths.size());
+    for (const Path64& path : paths)
+      cleaned.push_back(RemoveCollinearVertices(path));
+
+    Path64 points;
+    for (const Path64& path : cleaned)
+      points.insert(points.end(), path.begin(), path.end());
+    std::sort(points.begin(), points.end(), PointLess);
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    const auto index = [&points](const Point64& pt) {
+      return static_cast<size_t>(std::lower_bound(points.begin(), points.end(),
+        pt, PointLess) - points.begin());
+    };
+
+    std::vector<std::vector<size_t>> next(points.size());
+    std::vector<size_t> visitedBy(points.size(), none);
+    bool touching = false;
+    for (size_t pathNo = 0; pathNo < cleaned.size(); ++pathNo)
+    {
+      const Path64& path = cleaned[pathNo];
+      for (size_t i = 0; i < path.size(); ++i)
+      {
+        const Point64& a = path[i];
+        const Point64& b = path[(i + 1) % path.size()];
+        size_t from = index(a);
+        if (visitedBy[from] == pathNo) touching = true;
+        visitedBy[from] = pathNo;
+
+        // points are sorted on x, so only those in the edge's x range matter
+        const int64_t minX = std::min(a.x, b.x), maxX = std::max(a.x, b.x);
+        auto it = std::lower_bound(points.begin(), points.end(), minX,
+          [](const Point64& p, int64_t x) { return p.x < x; });
+        Path64 onEdge;
+        for (; it != points.end() && it->x <= maxX; ++it)
+          if (OnSegmentInterior(a, b, *it)) onEdge.push_back(*it);
+        std::sort(onEdge.begin(), onEdge.end(),
+          [&a](const Point64& p, const Point64& q) {
+            const int64_t dx1 = std::abs(p.x - a.x), dx2 = std::abs(q.x - a.x);
+            return (dx1 == dx2) ? (std::abs(p.y - a.y) < std::abs(q.y - a.y)) : (dx1 < dx2);
+          });
+        if (!onEdge.empty()) touching = true;
+        for (const Point64& pt : onEdge)
+        {
+          const size_t v = index(pt);
+          if (AddDirectedEdge(next, from, v)) touching = true;
+          from = v;
+        }
+        if (AddDirectedEdge(next, from, index(b))) touching = true;
+      }
+    }
+    if (!touching)
+    {
+      result = std::move(cleaned);
+      return false;
+    }
+
+    // Every point has as many edges in as out, so each walk ends where it began.
+    result.clear();
+    std::vector<size_t> stackPos(points.size(), none);
+    for (size_t start = 0; start < points.size(); ++start)
+    {
+      while (!next[start].empty())
+      {
+        std::vector<size_t> stack{ start };
+        stackPos[start] = 0;
+        size_t v = next[start].back();
+        next[start].pop_back();
+        for (;;)
+        {
+          if (stackPos[v] == none)
+          {
+            stackPos[v] = stack.size();
+            stack.push_back(v);
+          }
+          else
+          {
+            Path64 simpleLoop{ points[v] };
+            for (size_t j = stackPos[v] + 1; j < stack.size(); ++j)
+            {
+              stackPos[stack[j]] = none;
+              simpleLoop.push_back(points[stack[j]]);
+            }
+            stack.resize(stackPos[v] + 1);
+            result.push_back(std::move(simpleLoop));
+          }
+          if (next[v].empty()) break;
+          const size_t n = next[v].back();
+          next[v].pop_back();
+          v = n;
+        }
+        stackPos[start] = none;
+      }
+    }
+    return true;
   }
 
   static bool FindLocMinIdx(const Path64& path, size_t len, size_t& idx)
@@ -372,7 +525,6 @@ namespace Clipper2Lib
     allTriangles.resize(0);
 
     firstActive = nullptr;
-    lowermostVertex = nullptr;
    }
 
   void Delaunay::ForceLegal(Edge* edge)
@@ -565,6 +717,10 @@ namespace Clipper2Lib
 
     // split 'tmpE' into 2 edges at 'v'
     Vertex2* v2 = tmpE->vT;
+    // an ignored path's edges stay listed but are unlinked from their
+    // vertices and never swept, so there is nothing to shorten
+    if (std::find(v2->edges.begin(), v2->edges.end(), tmpE) == v2->edges.end())
+      return true;
     RemoveEdgeFromVertex(v2, tmpE);
     // replace v2 in tmpE with v
     if (tmpE->vL == v2) tmpE->vL = v; 
@@ -624,6 +780,25 @@ namespace Clipper2Lib
     CreateEdge(newT, oldT, longE->kind);
   }
 
+  // When every edge at a merged vertex rises from it, the area below the vertex
+  // is filled only if the leftmost edge fills on its left.
+  static bool FilledBelowMergedVertex(const Vertex2* v)
+  {
+    const Edge* leftmost = nullptr;
+    Point64 leftmostPt = v->pt;
+    for (const Edge* e : v->edges)
+    {
+      const Point64 pt = (e->vB == v) ? e->vT->pt : e->vB->pt;
+      if (pt.y >= v->pt.y) return false;
+      if (!leftmost || CrossProductSign(leftmostPt, v->pt, pt) > 0)
+      {
+        leftmost = e;
+        leftmostPt = pt;
+      }
+    }
+    return leftmost && leftmost->kind == EdgeKind::descend;
+  }
+
   void Delaunay::MergeDupOrCollinearVertices()
   {
     // note: this procedure may add new edges and change the
@@ -640,8 +815,6 @@ namespace Clipper2Lib
 
       // merge v1 & v2
       Vertex2* v1 = *vIter1, * v2 = *vIter2;
-      if (!v1->innerLM || !v2->innerLM)
-        v1->innerLM = false;
 
       // in all of v2's edges, replace links to v2 with links to v1
       for (auto e : v2->edges)
@@ -654,6 +827,7 @@ namespace Clipper2Lib
       // move all of v2's edges to v1
       std::copy(v2->edges.begin(), v2->edges.end(), back_inserter(v1->edges));
       v2->edges.resize(0);
+      v1->innerLM = FilledBelowMergedVertex(v1);
 
       // excluding horizontals, if pv.edges contains two edges
       // that are *collinear* and share the same bottom coords
@@ -733,7 +907,7 @@ namespace Clipper2Lib
     {
       while (e)
       {
-        if (e->vR->pt.x < xBest && e->vL->pt.x > xAbove &&
+        if (e->vL->pt.x < xBest && e->vR->pt.x > xAbove &&
           e->vB->pt.y > yAbove && e->vT->pt.y < yBest &&
           (SegsIntersect(e->vB->pt, e->vT->pt,
             vBest->pt, vAbove->pt) == IntersectKind::intersect))
@@ -933,34 +1107,7 @@ namespace Clipper2Lib
       return Paths64(); // oops!
     }
 
-    // if necessary fix path orientation because the algorithm 
-    // expects clockwise outer paths and counter-clockwise inner paths
-    if (lowermostVertex->innerLM)
-    {
-      // the orientation of added paths must be wrong, so
-      // 1. reverse innerLM flags ...
-      Vertex2* lm;
-      while (!locMinStack.empty())
-      {
-        lm = locMinStack.top();
-        lm->innerLM = !lm->innerLM;
-        locMinStack.pop();
-      }
-      // 2. swap edge kinds
-      for (Edge* e : allEdges)
-        if (e->kind == EdgeKind::ascend)
-          e->kind = EdgeKind::descend;
-        else
-          e->kind = EdgeKind::ascend;
-    }
-    else
-    {
-      // path orientation is fine so ...
-      while (!locMinStack.empty())
-        locMinStack.pop();
-    }
-
-    std::sort(allEdges.begin(), allEdges.end(), EdgeListSort);
+    std::stable_sort(allEdges.begin(), allEdges.end(), EdgeListSort);
     if (!FixupEdgeIntersects())
     { 
       CleanUp();
@@ -968,7 +1115,7 @@ namespace Clipper2Lib
       return Paths64(); // oops!
     }
 
-    std::sort(allVertices.begin(), allVertices.end(), VertexListSort);
+    std::stable_sort(allVertices.begin(), allVertices.end(), VertexListSort);
     MergeDupOrCollinearVertices();
     
     int64_t currY = allVertices[0]->pt.y;
@@ -1005,8 +1152,8 @@ namespace Clipper2Lib
           }
 
           // and because adding locMin edges to Actives was delayed ..
-          AddEdgeToActives(lm->edges[0]);
-          AddEdgeToActives(lm->edges[1]);
+          for (Edge* lmEdge : lm->edges)
+            AddEdgeToActives(lmEdge);
         }
 
         while (!horzEdgeStack.empty())
@@ -1103,69 +1250,28 @@ namespace Clipper2Lib
     return Sqr(pt1.x - pt2.x) + Sqr(pt1.y - pt2.y);
   }
 
-  void Delaunay::AddPath(const Path64& path)
+  void Delaunay::AddPath(const Path64& path, bool keepSmall)
   {
-    size_t len = path.size(), i0 = 0, iPrev, iNext;
+    size_t len = path.size(), i0 = 0;
     // find the first locMin for the current path
     if (!FindLocMinIdx(path, len, i0)) return;
-    iPrev = Prev(i0, len);
-    while (path[iPrev] == path[i0]) iPrev = Prev(iPrev, len);
-    iNext = Next(i0, len);
-
-    // it is possible for a locMin here to simply be a
-    // collinear spike that should be ignored, so ...
-    size_t i = i0;
-    while (CrossProductSign(path[iPrev], path[i], path[iNext]) == 0)
-    {
-      FindLocMinIdx(path, len, i);
-      if (i == i0) return; // this is an entirely collinear path
-      iPrev = Prev(i, len);
-      while (path[iPrev] == path[i]) iPrev = Prev(iPrev, len);
-      iNext = Next(i, len);
-    }
 
     size_t vert_cnt = allVertices.size();
-
-    // we are now at the first legitimate locMin
-    Vertex2* v0 = allVertices.emplace_back(new Vertex2(path[i]));
-
-    if (LeftTurning(path[iPrev], path[i], path[iNext]))
+    Vertex2* v0 = allVertices.emplace_back(new Vertex2(path[i0]));
+    if (LeftTurning(path[Prev(i0, len)], path[i0], path[Next(i0, len)]))
       v0->innerLM = true;
     Vertex2* vPrev = v0;
-    i = iNext;
+    size_t i = Next(i0, len);
 
     for (;;)
     {
-      // vPrev is a locMin here
-      locMinStack.push(vPrev);
-      // ? update lowermostVertex ...
-      if (!lowermostVertex ||
-        vPrev->pt.y > lowermostVertex->pt.y ||
-        (vPrev->pt.y == lowermostVertex->pt.y &&
-        vPrev->pt.x < lowermostVertex->pt.x)) 
-          lowermostVertex = vPrev;
-
-      iNext = Next(i, len);
-      if (CrossProductSign(vPrev->pt, path[i], path[iNext]) == 0)
-      {
-        i = iNext;
-        continue;
-      }
-
-      // ascend up next bound to LocMax
+      // vPrev is a locMin here, so ascend up next bound to LocMax
       while (path[i].y <= vPrev->pt.y)
       {
         Vertex2* v = allVertices.emplace_back(new Vertex2(path[i]));
         CreateEdge(vPrev, v, EdgeKind::ascend);
         vPrev = v;
-        i = iNext;
-        iNext = Next(i, len);
-
-        while (CrossProductSign(vPrev->pt, path[i], path[iNext]) == 0)
-        {
-          i = iNext;
-          iNext = Next(i, len);
-        }
+        i = Next(i, len);
       }
 
       // Now at a locMax, so descend to next locMin
@@ -1176,14 +1282,7 @@ namespace Clipper2Lib
         CreateEdge(v, vPrev, EdgeKind::descend);
         vPrevPrev = vPrev;
         vPrev = v;
-        i = iNext;
-        iNext = Next(i, len);
-
-        while (CrossProductSign(vPrev->pt, path[i], path[iNext]) == 0)
-        {
-          i = iNext;
-          iNext = Next(i, len);
-        }
+        i = Next(i, len);
       }
 
       // now at the next locMin
@@ -1193,21 +1292,34 @@ namespace Clipper2Lib
     }
     CreateEdge(v0, vPrev, EdgeKind::descend);
 
-    // finally, ignore this path if is not a polygon or too small
+    // finally, ignore this path if is not a polygon or too small. A small
+    // triangle cut from a larger path that touched another is part of its area.
     len = allVertices.size() - vert_cnt;
     i = vert_cnt;
-    if (len < 3 || (len == 3 &&      // or just a very tiny triangle
+    if (!keepSmall && (len < 3 || (len == 3 &&      // or just a very tiny triangle
       ((DistSqr(allVertices[i]->pt, allVertices[i + 1]->pt) <= 1) ||
         (DistSqr(allVertices[i + 1]->pt, allVertices[i + 2]->pt) <= 1) ||
-        (DistSqr(allVertices[i + 2]->pt, allVertices[i]->pt) <= 1))))
+        (DistSqr(allVertices[i + 2]->pt, allVertices[i]->pt) <= 1)))))
     {
       for (size_t j = vert_cnt; j < allVertices.size(); ++j)
         allVertices[j]->edges.clear(); // flag to ignore
     }
   }
 
-  bool Delaunay::AddPaths(const Paths64& paths)
+  bool Delaunay::AddPaths(const Paths64& input)
   {
+    Paths64 paths;
+    const bool touching = ResolveTouchingPaths(input, paths);
+
+    // the sweep expects clockwise outer paths and counter-clockwise holes.
+    // Holes lie inside outer paths, so the outer paths' sign wins the sum.
+    double totalArea = 0;
+    for (const Path64& path : paths)
+      totalArea += Area(path);
+    if (totalArea < 0)
+      for (Path64& path : paths)
+        std::reverse(path.begin(), path.end());
+
     const auto total_vertex_count =
       std::accumulate(paths.begin(), paths.end(), size_t(0),
         [](const auto& a, const Path64& path)
@@ -1217,7 +1329,7 @@ namespace Clipper2Lib
     allEdges.reserve(allEdges.capacity() + total_vertex_count);
 
     for (const Path64& path : paths)
-      AddPath(path);
+      AddPath(path, touching);
     return (allVertices.size() > 2);
   }
 
